@@ -1,0 +1,283 @@
+name: Laravel SOP Check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: laravel-sop-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  laravel_sop_check:
+    name: Laravel SOP Check
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_NAME: ${{ github.event.repository.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run Laravel SOP check
+        shell: bash
+        run: |
+          echo "=== LARAVEL SOP CHECK - $PROJECT_NAME ==="
+          echo "Checking Laravel Coding SOP and database-service migration policy..."
+
+          ERROR_FILE="sop_errors.log"
+          WARNING_FILE="sop_warnings.log"
+
+          rm -f "$ERROR_FILE" "$WARNING_FILE"
+          touch "$ERROR_FILE" "$WARNING_FILE"
+
+          echo "=== 1. Laravel base structure check ==="
+
+          test -f composer.json || echo "ERROR: composer.json tidak ditemukan." | tee -a "$ERROR_FILE"
+          test -f artisan || echo "ERROR: artisan tidak ditemukan." | tee -a "$ERROR_FILE"
+          test -d app/Http/Controllers || echo "ERROR: app/Http/Controllers tidak ditemukan." | tee -a "$ERROR_FILE"
+          test -d app/Http/Requests || echo "ERROR: app/Http/Requests tidak ditemukan. Validasi wajib menggunakan FormRequest." | tee -a "$ERROR_FILE"
+          test -d app/Http/Resources || echo "ERROR: app/Http/Resources tidak ditemukan. Response API wajib menggunakan Resource." | tee -a "$ERROR_FILE"
+          test -d app/Repositories || echo "ERROR: app/Repositories tidak ditemukan. Query Eloquent wajib berada di Repository." | tee -a "$ERROR_FILE"
+
+          if [ ! -d app/Services ] && [ ! -d app/Handlers ] && [ ! -d app/Http/Handlers ]; then
+            echo "ERROR: app/Services atau app/Handlers tidak ditemukan. Business logic wajib berada di Service/Handler." | tee -a "$ERROR_FILE"
+          fi
+
+          echo ""
+          # Catatan: pengecekan "backend tidak boleh punya migration/seeder" sengaja dihapus,
+          # karena repo ini menggabungkan aplikasi Laravel dan database (migration/seeder).
+          # Validasi migration/seeder dilakukan di job validate_database_service.
+
+          echo ""
+          echo "=== 3. Controller SOP check ==="
+
+          if [ -d app/Http/Controllers ]; then
+            grep -R --include="*.php" -nE "use App\\\\Repositories\\\\|App\\\\Repositories\\\\" app/Http/Controllers \
+              | tee -a "$ERROR_FILE" || true
+
+            grep -R --include="*.php" -nE "DB::|::where\(|::query\(|::create\(|::update\(|::delete\(|::find\(|::findOrFail\(|::all\(|::with\(|::withTrashed\(|onlyTrashed\(|->where\(|->join\(|->select\(" app/Http/Controllers \
+              | tee -a "$ERROR_FILE" || true
+
+            grep -R --include="*.php" -nE "Validator::|->validate\(|request\(\)->validate" app/Http/Controllers \
+              | tee -a "$ERROR_FILE" || true
+
+            grep -R --include="*.php" -nE "return response\(\)->json\(\[|return \[" app/Http/Controllers \
+              | tee -a "$ERROR_FILE" || true
+
+            grep -R --include="*.php" -nE "use Illuminate\\\\Http\\\\Request;" app/Http/Controllers \
+              | tee -a "$WARNING_FILE" || true
+
+            for FILE in $(find app/Http/Controllers -type f -name "*.php" ! -name "Controller.php"); do
+              if ! grep -qE "Service|Handler" "$FILE"; then
+                echo "ERROR: $FILE belum memanggil Service atau Handler." | tee -a "$ERROR_FILE"
+              fi
+
+              if ! grep -qE "Resource|Collection" "$FILE"; then
+                echo "ERROR: $FILE belum menggunakan API Resource untuk response." | tee -a "$ERROR_FILE"
+              fi
+            done
+          fi
+
+          echo ""
+          echo "=== 4. Eloquent query outside Repository check ==="
+
+          if [ -d app ]; then
+
+            find app -type f -name "*.php" \
+              ! -path "app/Repositories/*" \
+              ! -path "app/Models/*" \
+              -print0 | xargs -0 -r grep -nE "::where\(|::query\(|::create\(|::update\(|::delete\(|::find\(|::findOrFail\(|::all\(|::with\(|::withTrashed\(|::onlyTrashed\(" \
+              | tee -a "$ERROR_FILE" || true
+
+            if [ -d app/Policies ]; then
+              grep -R --include="*.php" -nE -- "->(where|whereHas|with|withCount|join|select|first|firstOrFail|find|findOrFail|exists|count|get|paginate|withTrashed|onlyTrashed)\(" app/Policies \
+                | tee -a "$ERROR_FILE" || true
+            fi
+
+          fi
+
+          echo ""
+          echo "=== 5. FormRequest check ==="
+
+          if [ -d app/Http/Requests ]; then
+
+            NON_PHP_REQUESTS=$(find app/Http/Requests -type f ! -name "*.php")
+
+            if [ -n "$NON_PHP_REQUESTS" ]; then
+              echo "$NON_PHP_REQUESTS" | tee -a "$ERROR_FILE"
+              echo "ERROR: File di app/Http/Requests wajib menggunakan extension .php." | tee -a "$ERROR_FILE"
+            fi
+
+            for FILE in $(find app/Http/Requests -type f -name "*.php"); do
+              if ! grep -q "function rules" "$FILE"; then
+                echo "ERROR: $FILE tidak memiliki method rules()." | tee -a "$ERROR_FILE"
+              fi
+
+              if ! grep -q "function messages" "$FILE"; then
+                echo "WARNING: $FILE belum memiliki method messages()." | tee -a "$WARNING_FILE"
+              fi
+            done
+
+          fi
+
+          # Ringkasan di halaman hasil workflow (tab Summary)
+          {
+            echo "## Laravel SOP Check - $PROJECT_NAME"
+            echo "- Errors: $(wc -l < "$ERROR_FILE" | tr -d ' ') baris"
+            echo "- Warnings: $(wc -l < "$WARNING_FILE" | tr -d ' ') baris"
+            if [ -s "$ERROR_FILE" ]; then
+              echo ""
+              echo "### Errors"
+              echo '```'
+              cat "$ERROR_FILE"
+              echo '```'
+            fi
+            if [ -s "$WARNING_FILE" ]; then
+              echo ""
+              echo "### Warnings"
+              echo '```'
+              cat "$WARNING_FILE"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo ""
+          echo "=== WARNINGS ==="
+          if [ -s "$WARNING_FILE" ]; then
+            cat "$WARNING_FILE"
+          else
+            echo "No warnings."
+          fi
+
+          echo ""
+          echo "=== ERRORS ==="
+          if [ -s "$ERROR_FILE" ]; then
+            cat "$ERROR_FILE"
+            echo ""
+            echo "Laravel SOP check failed."
+            exit 1
+          fi
+
+          echo "Laravel SOP check passed."
+
+  validate_database_service:
+    name: Validate Database Service
+    runs-on: ubuntu-latest
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Validate migrations & seeders
+        shell: bash
+        run: |
+          echo "=== VALIDATE DATABASE SERVICE ==="
+          GLOBAL_FAILS=0
+
+          # 1. Validasi struktur dasar
+          test -f composer.json || { echo "ERROR: composer.json tidak ditemukan"; exit 1; }
+          test -f artisan || { echo "ERROR: artisan tidak ditemukan"; exit 1; }
+          test -d database/migrations || { echo "ERROR: database/migrations tidak ditemukan"; exit 1; }
+          test -d database/seeders || { echo "ERROR: database/seeders tidak ditemukan"; exit 1; }
+
+          echo "Checking PHP syntax in migrations & seeders..."
+          while IFS= read -r -d '' file; do
+            if OUT=$(php -l "$file" 2>&1); then
+              echo "OK: $file"
+            else
+              echo "$OUT"
+              echo "❌ ERROR: Syntax error di $file"
+              GLOBAL_FAILS=1
+            fi
+          done < <(find database/migrations database/seeders -type f -name "*.php" -print0)
+
+          echo "Checking duplicate named class names..."
+          DUPLICATES=$(grep -Rho --include="*.php" "class [A-Za-z0-9_]*" database/migrations database/seeders 2>/dev/null \
+            | grep -v "class extends" \
+            | sort \
+            | uniq -d \
+            || true)
+
+          if [ -n "$DUPLICATES" ]; then
+            echo "❌ ERROR: Ditemukan duplicate named class name di migration/seeder:"
+            echo "$DUPLICATES"
+            GLOBAL_FAILS=1
+          fi
+
+          echo "Checking duplicate migration timestamp..."
+          DUP=$(ls database/migrations 2>/dev/null | grep '\.php$' | cut -d'_' -f1-4 | sort | uniq -d || true)
+          if [ -n "$DUP" ]; then
+            echo "❌ ERROR SOP: Ditemukan duplicate migration timestamp:"
+            echo "$DUP"
+            GLOBAL_FAILS=1
+          fi
+
+          # 2. Validasi strict SOP (hanya file migration yang ditambah/diubah di pull request)
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "=== MENJALANKAN PENGECEKAN SOP STRICT UNTUK PULL REQUEST ==="
+
+            git fetch --no-tags origin "$BASE_REF" || true
+            CHANGED_FILES=$(git diff --name-only --diff-filter=AMR "origin/$BASE_REF...HEAD" -- database/migrations/ 2>/dev/null || true)
+
+            if [ -n "$CHANGED_FILES" ]; then
+              for file in $CHANGED_FILES; do
+                [ -f "$file" ] || continue
+                echo "Memeriksa SOP file: $file"
+
+                # SOP A: Schema::create wajib di dalam Schema::hasTable
+                if grep -q "Schema::create" "$file" && ! grep -q "hasTable" "$file"; then
+                  echo "❌ ERROR SOP: $file menggunakan Schema::create tanpa pengecekan Schema::hasTable"
+                  GLOBAL_FAILS=1
+                fi
+
+                # SOP B: ID wajib UUID (kecuali tabel bawaan jobs & personal_access_tokens)
+                if ! echo "$file" | grep -qE "create_jobs_table|personal_access_tokens"; then
+                  if grep -nE "\->(id|increments|bigIncrements)\(" "$file"; then
+                    echo "❌ ERROR SOP: $file masih menggunakan auto-increment ID! Wajib \$table->uuid('id')->primary()"
+                    GLOBAL_FAILS=1
+                  fi
+                fi
+
+                # SOP C: Relasi dilarang cascade / onDelete / onUpdate
+                if grep -nE "\->(onDelete|onUpdate|cascadeOnDelete|nullOnDelete|restrictOnDelete|cascadeOnUpdate|cascade)\(" "$file"; then
+                  echo "❌ ERROR SOP: $file relasi dilarang menggunakan cascade, onDelete, atau onUpdate"
+                  GLOBAL_FAILS=1
+                fi
+
+                # SOP D: Wajib SoftDeletes
+                if grep -q "Schema::create" "$file" && ! echo "$file" | grep -qE "cache_table|jobs_table|personal_access_tokens|sessions_table"; then
+                  if ! grep -qE "softDeletes|deleted_at" "$file"; then
+                    echo "❌ ERROR SOP: $file belum memiliki \$table->softDeletes()"
+                    GLOBAL_FAILS=1
+                  fi
+                fi
+              done
+            else
+              echo "Tidak ada file migration baru yang diubah di pull request ini."
+            fi
+          else
+            echo "Bukan pull request: strict SOP diff dilewati (hanya syntax & basic check)."
+          fi
+
+          # 3. Kesimpulan akhir
+          echo "=== KESIMPULAN VALIDASI ==="
+          if [ "$GLOBAL_FAILS" -ne 0 ]; then
+            echo "❌ Pipeline FAILED! Terdapat pelanggaran SOP atau syntax error."
+            echo "### ❌ Validate Database Service gagal — lihat log job untuk detail." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "✅ Validasi berhasil."
+          echo "### ✅ Validate Database Service berhasil." >> "$GITHUB_STEP_SUMMARY"
