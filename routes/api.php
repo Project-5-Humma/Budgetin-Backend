@@ -13,5 +13,5 @@ Route::middleware('auth:api')->group(function () {
     Route::get('me', [AuthController::class, 'me']);
 
     // Transaction
-    Route::post('transactions', [TransactionController::class, 'store']);
+    Route::apiResource('transactions', TransactionController::class);
 });

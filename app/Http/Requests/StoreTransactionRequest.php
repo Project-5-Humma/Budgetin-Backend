@@ -15,9 +15,14 @@ class StoreTransactionRequest extends FormRequest
     {
         return [
             'category_id' => [
-                'nullable',
-                'integer',
+                'required',
+                'uuid',
                 'exists:categories,id',
+            ],
+            'wallet_id' => [
+                'required',
+                'uuid',
+                'exists:wallets,id',
             ],
             'type' => [
                 'required',
@@ -42,8 +47,10 @@ class StoreTransactionRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'category_id.integer' => 'Kategori harus berupa angka.',
             'category_id.exists' => 'Kategori tidak ditemukan.',
+            'category_id.required' => 'Kategori wajib diisi',
+            'wallet_id.exists' => 'Dompet tidak ditemukan.',
+            'wallet_id.required' => 'Kategori tabungan wajib diisi',
             'type.required' => 'Jenis transaksi wajib diisi.',
             'type.in' => 'Jenis transaksi harus income atau expense.',
             'amount.required' => 'Jumlah transaksi wajib diisi.',
